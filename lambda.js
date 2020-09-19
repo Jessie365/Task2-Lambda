@@ -4,27 +4,47 @@ const DB = new AWS.DynamoDB.DocumentClient()
 exports.handler = async (event) => {
     const invocationDate = Date.now()
     const ec2 = new AWS.EC2({apiVersion: '2016-11-15'})
-    const regionsData = await ec2.describeRegions().promise()
-    for (let region of regionsData.Regions) {
-        const ec2Regional = new AWS.EC2({apiVersion: '2016-11-15', region: region.RegionName})
-        const vpcsData = await ec2Regional.describeVpcs().promise()
-        const subnetsData = await ec2Regional.describeSubnets().promise()
-        await persistVpsWithSubnets(vpcsData, subnetsData, region, invocationDate)
+
+    let regionsData
+    try {
+        regionsData = await ec2.describeRegions().promise()
+    } catch (ex) {
+        console.log('There was an error fetching regions data')
+        console.log(ex)
+        return 1
     }
-    const response = {
-        statusCode: 200,
-        body: JSON.stringify('gr8'),
-    };
-    return response;
+    
+    for (let region of regionsData.Regions) {
+        let ec2Regional = new AWS.EC2({apiVersion: '2016-11-15', region: region.RegionName})
+        let vpcsData, subnetsData
+
+        try {
+            vpcsData = await ec2Regional.describeVpcs().promise()
+            subnetsData = await ec2Regional.describeSubnets().promise()
+        } catch (ex) {
+            console.log(`There was an error fetching VPCs and subnets for region: ${region.RegionName}`)
+            console.log(ex)
+            return 1
+        }
+        
+        try {
+            await persistVpsWithSubnets(vpcsData, subnetsData, region, invocationDate)
+        } catch (ex) {
+            console.log(`There was an error persisting VPCs for region: ${region.RegionName}`)
+            console.log(ex)
+            return 1
+        }
+        
+    }
+    console.log('VPC information for each Region saved!')
+    return 0;
 };
 
 // vpcsData    -> info for all VPCs in particular Region
 // subnetsData -> info for all Subnets in particular Region
 async function persistVpsWithSubnets(vpcsData, subnetsData, region, invocationDate) {
     for (let vpc of vpcsData.Vpcs) {
-        console.log(vpc.VpcId)
         const subnets = subnetsData.Subnets.filter(s => s.VpcId == vpc.VpcId)
-        // console.log(subnets)
         let vpcToPersist = (({VpcId, State, CidrBlock, IsDefault}) => ({VpcId, State, CidrBlock, IsDefault}))(vpc)
         vpcToPersist.Region = region.RegionName
         vpcToPersist.Subnets = []
@@ -32,11 +52,11 @@ async function persistVpsWithSubnets(vpcsData, subnetsData, region, invocationDa
             subnet = (({SubnetId, State, CidrBlock, AvailableIpAddressCount}) => ({SubnetId, State, CidrBlock, AvailableIpAddressCount}))(subnet)
             vpcToPersist.Subnets.push(subnet)
         }
-        console.log(vpcToPersist)
         await persistVpc(vpcToPersist, invocationDate)
     }
 }
 
+// Persist single VPC with its subnets in DynamoDB using document client
 async function persistVpc(vpc, invocationDate) {   
     let params = {
         Item: {
@@ -45,6 +65,5 @@ async function persistVpc(vpc, invocationDate) {
         },
         TableName: 'VpcInfo'
     }
-    console.log(params)
     await DB.put(params).promise()
 }
